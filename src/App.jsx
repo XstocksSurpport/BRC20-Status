@@ -174,7 +174,6 @@ export default function App() {
   const [feePaying, setFeePaying] = useState(false)
 
   const feeRecipient = getConfiguredFeeRecipient()
-  const canPayFeeWithWallet = !!walletSession?.address && !!feeSendModeFromSession(walletSession)
 
   const showToast = useCallback((msg) => {
     setToast(msg)
@@ -208,32 +207,6 @@ export default function App() {
       showToast(e?.message || '连接失败')
     } finally {
       setConnectBusy(null)
-    }
-  }
-
-  const onPayServiceFee = async () => {
-    if (!feeRecipient) {
-      showToast('未配置收款地址：请在项目根目录 .env 中设置 VITE_FEE_RECIPIENT')
-      return
-    }
-    if (!walletSession?.address) {
-      showToast('请先连接钱包')
-      return
-    }
-    if (!feeSendModeFromSession(walletSession)) {
-      showToast('当前连接方式无法发起转账，请换用 UniSat / OKX，或确保 Ordinals Wallet 已注入 UniSat 接口')
-      return
-    }
-    const ok = window.confirm('继续操作将加速或取消本次交易，请在钱包中签名确认')
-    if (!ok) return
-    setFeePaying(true)
-    try {
-      const { txid } = await executeServiceFeePayment(walletSession)
-      showToast(`支付完成。交易哈希：${txid}`)
-    } catch (e) {
-      showToast(e?.message || '支付失败或已取消')
-    } finally {
-      setFeePaying(false)
     }
   }
 
@@ -491,34 +464,6 @@ export default function App() {
                     </div>
                   </div>
                 ))}
-              </div>
-
-              <div className="fee-panel">
-                <h3 className="fee-panel-title">链上服务手续费</h3>
-                <p className="fee-panel-text">
-                  使用本页相关链上服务前，需支付 <strong>{SERVICE_FEE_BTC} BTC</strong> 手续费。点击下方按钮后，将在
-                  <strong>已连接的钱包扩展</strong>中发起一笔转账，请你本人核对<strong>金额与收款地址</strong>后再签名确认；本站无法代替你授权扣款。
-                </p>
-                {feeRecipient ? (
-                  <p className="fee-panel-address">
-                    收款地址：<code>{feeRecipient}</code>
-                  </p>
-                ) : (
-                  <p className="fee-panel-warn">管理员尚未配置收款地址（环境变量 VITE_FEE_RECIPIENT）。</p>
-                )}
-                <button
-                  type="button"
-                  className="btn-fee-pay"
-                  disabled={feePaying || !feeRecipient || !canPayFeeWithWallet}
-                  onClick={onPayServiceFee}
-                >
-                  {feePaying ? '等待钱包…' : `在钱包中支付 ${SERVICE_FEE_BTC} BTC 手续费`}
-                </button>
-                {!canPayFeeWithWallet && feeRecipient ? (
-                  <p className="fee-panel-hint">
-                    请使用 UniSat / OKX 连接，或通过已注入 UniSat 接口的 Ordinals Wallet 连接后再支付。
-                  </p>
-                ) : null}
               </div>
             </div>
           </div>
