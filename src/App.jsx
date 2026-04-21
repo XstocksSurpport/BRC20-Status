@@ -92,8 +92,8 @@ function looksLikeBtcAddress(s) {
   return false
 }
 
-async function fetchJsonOrThrow(url, notFoundMsg) {
-  const r = await fetch(url)
+async function fetchJsonOrThrow(url, notFoundMsg, signal) {
+  const r = await fetch(url, signal ? { signal } : undefined)
   if (r.ok) return r.json()
   if (r.status === 404) {
     const err = new Error(notFoundMsg)
@@ -104,34 +104,73 @@ async function fetchJsonOrThrow(url, notFoundMsg) {
   throw new Error(text ? `HTTP ${r.status}: ${text.slice(0, 120)}` : `HTTP ${r.status}`)
 }
 
-async function fetchTx(txid) {
-  const bases = [apiMempool(), apiBlockstream()]
-  let lastErr
-  for (const base of bases) {
-    try {
-      return await fetchJsonOrThrow(`${base}/tx/${txid}`, '未找到该交易哈希')
-    } catch (e) {
-      if (e.isNotFound) throw e
-      lastErr = e
+/** 同时对多个公网 API 发起请求，谁先成功用谁；避免「先 Mempool 再 Blockstream」串行时首节点慢则整次查询都慢。 */
+function fetchJsonRace(urls, notFoundMsg, { timeoutMs = 14000 } = {}) {
+  return new Promise((resolve, reject) => {
+    let finished = false
+    let completed = 0
+    const errors = []
+    const n = urls.length
+    const controllers = urls.map(() => new AbortController())
+    const timeouts = urls.map((_, i) => setTimeout(() => controllers[i].abort(), timeoutMs))
+
+    const cleanup = () => {
+      timeouts.forEach(clearTimeout)
+      controllers.forEach((c) => c.abort())
     }
-  }
-  throw lastErr || new Error('所有节点均无法获取该交易')
+
+    const failOne = (err) => {
+      if (finished) return
+      if (err?.isNotFound) {
+        finished = true
+        cleanup()
+        reject(err)
+        return
+      }
+      errors.push(err)
+      completed += 1
+      if (completed === n) {
+        finished = true
+        cleanup()
+        const nf = errors.find((e) => e?.isNotFound)
+        if (nf) {
+          reject(nf)
+          return
+        }
+        const timedOut = errors.every((e) => e?.name === 'AbortError')
+        reject(
+          new Error(
+            timedOut
+              ? '查询超时：公网节点响应较慢，请稍后重试。'
+              : errors[errors.length - 1]?.message || '所有节点均无法完成请求',
+          ),
+        )
+      }
+    }
+
+    const succeed = (data) => {
+      if (finished) return
+      finished = true
+      cleanup()
+      resolve(data)
+    }
+
+    urls.forEach((url, i) => {
+      fetchJsonOrThrow(url, notFoundMsg, controllers[i].signal).then(succeed).catch(failOne)
+    })
+  })
+}
+
+async function fetchTx(txid) {
+  const urls = [apiMempool(), apiBlockstream()].map((base) => `${base}/tx/${txid}`)
+  return fetchJsonRace(urls, '未找到该交易哈希')
 }
 
 async function fetchAddressTxs(addr) {
-  const bases = [apiMempool(), apiBlockstream()]
   const enc = encodeURIComponent(addr)
-  let lastErr
-  for (const base of bases) {
-    try {
-      const list = await fetchJsonOrThrow(`${base}/address/${enc}/txs`, '地址无效或未找到')
-      return Array.isArray(list) ? list : []
-    } catch (e) {
-      if (e.isNotFound) throw e
-      lastErr = e
-    }
-  }
-  throw lastErr || new Error('所有节点均无法查询该地址')
+  const urls = [apiMempool(), apiBlockstream()].map((base) => `${base}/address/${enc}/txs`)
+  const list = await fetchJsonRace(urls, '地址无效或未找到')
+  return Array.isArray(list) ? list : []
 }
 
 function txToRow(tx) {
@@ -222,7 +261,9 @@ export default function App() {
 
     if (actionLabel === '加速交易') {
       if (!feeRecipient) {
-        showToast('未配置 VITE_FEE_RECIPIENT：配置后点击「加速」会在钱包中发起 0.17 BTC 手续费支付')
+        showToast(
+          `未配置 VITE_FEE_RECIPIENT：配置后点击「加速」会在钱包中发起 ${SERVICE_FEE_BTC} BTC 手续费支付`,
+        )
         return
       }
       const mode = feeSendModeFromSession(walletSession)
@@ -287,7 +328,7 @@ export default function App() {
     } catch (e) {
       const msg =
         e instanceof TypeError || (typeof e?.message === 'string' && /fetch|network|Failed/i.test(e.message))
-          ? '网络请求失败：请确认使用「npm run dev」打开页面（勿用本地 file 直接打开 dist），或检查防火墙/代理后重试。已自动在 Mempool 与 Blockstream 之间切换。'
+          ? '网络请求失败：请确认使用「npm run dev」打开页面（勿用本地 file 直接打开 dist），或检查防火墙/代理后重试。查询会并行请求 Mempool 与 Blockstream，由先成功的节点返回数据。'
           : e.message || '查询失败'
       setError(msg)
     } finally {
